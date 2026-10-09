@@ -7,6 +7,7 @@ import { BRIDGE_VERSION } from './version.js';
 import { BambuCloudClient } from './bambu-cloud.js';
 import { ShellyClient } from './smartplug/shelly.js';
 import { addEvent } from './events.js';
+import { classifyTransition, resolveFilamentSlots, slotLabel } from './job-events.js';
 
 async function push(
   cfg: PrinterConfig,
@@ -66,6 +67,16 @@ function sleep(ms: number) {
   return new Promise<void>(r => setTimeout(r, ms));
 }
 
+interface PendingJobEvent {
+  snapshot: PrinterSnapshot;
+  eventType: EventType;
+  durationMin?: number;
+  slotSource: SlotRef['source'];
+  attempts: number;
+}
+
+const MAX_JOB_EVENT_ATTEMPTS = 10; // danach aufgeben, damit Status-Updates nicht dauerhaft blockiert sind
+
 export async function runBridge(
   adapter: Adapter,
   cfg: PrinterConfig,
@@ -86,11 +97,14 @@ export async function runBridge(
   // Initial heartbeat to verify token
   try {
     const heartbeat: IngestBody = { auth_token: cfg.flowntAuthToken, event_type: 'heartbeat', bridge_version: BRIDGE_VERSION };
-    await fetch(`${FLOWNT_EDGE_URL}/bridge-ingest`, {
+    const res = await fetch(`${FLOWNT_EDGE_URL}/bridge-ingest`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(heartbeat),
+      signal: AbortSignal.timeout(10_000),
     });
+    // Ohne Status-Check meldete ein abgelehnter Token (401) trotzdem „Auth OK".
+    if (!res.ok) throw new Error(`bridge-ingest ${res.status}`);
     console.log(`[${cfg.name}] Auth OK ✓`);
     state.error = null;
     addEvent(cfg.id, 'success', 'Verbindung zu Flownt hergestellt ✓');
@@ -101,18 +115,41 @@ export async function runBridge(
   }
 
   let consecutiveErrors = 0;
-  let prevStatus: PrinterSnapshot['status'] | null = null;
+  let prevStatus: PrinterSnapshot['status'] | null = null; // letzter Status ≠ offline
+  let lostContactDuringJob = false;           // offline-Phase während eines aktiven Drucks
   let printStartedAt: number | null = null;
   let lastActiveSlot: number | null = null;   // physischer AMS-Slot (tray_now), global: unit*4+slot
-  let lastSourceJobId: string | null = null;  // Job-ID waehrend des Drucks gemerkt → beim Abschluss senden (Dedup)
+  let lastSourceJobId: string | null = null;  // Job-ID während des Drucks gemerkt → beim Abschluss senden (Dedup)
   let lastAmsSlots: AmsSlot[] = [];           // letzter AMS-Status (Farbe je physischem Slot) — Fallback-Zuordnung per Farbe
   let lastFilamentMapping: number[] = [];     // Bambu print.mapping (Slicer-Filament-id → physischer Tray-Code) — primäre, deterministische Zuordnung
   let lastEnergyWh: number | null = null;     // letzter Energiezähler-Stand vom Smart-Plug (Wh)
   let energyStartWh: number | null = null;    // Zählerstand bei Druckstart (für Verbrauchs-Differenz)
+  // Job-Ende, dessen Push fehlgeschlagen ist: wird vor dem nächsten Poll erneut gesendet,
+  // sonst ginge der Drucklog bei einem kurzen Netzwerkfehler am Druckende verloren
+  // (der Übergang ist danach schon „verbraucht"). Backend dedupt über source_job_id.
+  let pendingJobEvent = null as PendingJobEvent | null;
 
   while (!isCancelled()) {
     try {
+      if (pendingJobEvent) {
+        const p = pendingJobEvent;
+        p.attempts++;
+        try {
+          await push(cfg, p.snapshot, p.eventType, p.durationMin, p.slotSource);
+          pendingJobEvent = null;
+          addEvent(cfg.id, 'success', `Job-Ende nachgemeldet: ${p.snapshot.printFile ?? '–'}`);
+        } catch (err) {
+          if (p.attempts >= MAX_JOB_EVENT_ATTEMPTS) {
+            pendingJobEvent = null;
+            addEvent(cfg.id, 'warn', `Job-Ende nach ${p.attempts} Versuchen verworfen: ${p.snapshot.printFile ?? '–'}`);
+          }
+          throw err;
+        }
+      }
+
       let snapshot = await adapter.getSnapshot();
+      // Während getSnapshot() gestoppt (Config geändert/gelöscht) → nicht mehr pushen.
+      if (isCancelled()) break;
 
       // Smart-Plug (Shelly): Momentanleistung lesen und in den Snapshot mergen.
       // Fehlertolerant — ein nicht erreichbarer Plug darf den Druckerstatus nicht stören.
@@ -126,21 +163,22 @@ export async function runBridge(
 
       state.snapshot = snapshot;
 
-      // Job-Ende erkennen: aktiv (printing/paused) → terminal (idle ODER error).
+      // Job-Übergang erkennen: aktiv (printing/paused) → terminal (idle ODER error).
       // Ausgang aus dem normalisierten jobResult des Adapters; Fallback aus dem Status.
       let eventType: EventType = 'status_update';
       let durationMin: number | undefined;
-      const wasActive = prevStatus === 'printing' || prevStatus === 'paused';
-      const isTerminal = wasActive && (snapshot.status === 'idle' || snapshot.status === 'error');
-      if (isTerminal) {
-        const outcome = snapshot.jobResult ?? (snapshot.status === 'error' ? 'failed' : 'completed');
-        eventType = outcome === 'completed' ? 'job_complete' : 'job_failed';
-        // Job-ID vom laufenden Druck an den Abschluss haengen (Re-Emission → gleiche ID → Dedup)
+      const transition = classifyTransition(prevStatus, snapshot, lostContactDuringJob);
+      if (transition.kind === 'ended') {
+        const { outcome } = transition;
+        eventType = transition.eventType;
+        // Job-ID vom laufenden Druck an den Abschluss hängen (Re-Emission → gleiche ID → Dedup)
         snapshot = { ...snapshot, sourceJobId: lastSourceJobId ?? snapshot.sourceJobId };
         if (printStartedAt != null) {
           durationMin = Math.round((Date.now() - printStartedAt) / 60_000);
         }
         printStartedAt = null;
+        lastSourceJobId = null;
+        lostContactDuringJob = false;
         // Gemessener Stromverbrauch = Energiezähler(Ende) − Energiezähler(Start) — auch bei Abbruch sinnvoll
         if (smartPlug && energyStartWh != null && lastEnergyWh != null) {
           const usedWh = lastEnergyWh - energyStartWh;
@@ -156,24 +194,28 @@ export async function runBridge(
         } else {
           console.log(`[${cfg.name}] Job abgeschlossen → Drucklog-Eintrag (${durationMin ?? '?'} min)`);
         }
-      }
-      // Only (re-)start timer when transitioning into printing from a non-print state
-      if (snapshot.status === 'printing' && prevStatus !== 'printing' && prevStatus !== 'paused') {
+      } else if (transition.kind === 'started') {
         printStartedAt = Date.now();
         energyStartWh = lastEnergyWh; // Energiezähler-Stand bei Druckstart merken
-        // JOB-Zustand des Vordrucks verwerfen: Das ams_mapping gehört zum jeweiligen Druck.
-        // Ohne Reset erbte ein Druck ohne eigenes Mapping (externe Spule!) das Mapping des
-        // Vordrucks — der Mapping-Pfad hat Buchungs-Vorrang und ordnete den Verbrauch dem
-        // alten AMS-Slot zu (Bug Test 3). lastActiveSlot bleibt bewusst stehen (254 kommt
+        // JOB-Zustand des Vordrucks verwerfen: ams_mapping und Job-ID gehören zum jeweiligen
+        // Druck. Ohne Reset erbte ein Druck ohne eigenes Mapping (externe Spule!) das Mapping
+        // des Vordrucks (v0.9.4) bzw. ein Druck ohne Job-ID die ID des Vordrucks — und würde
+        // im Backend als Duplikat verworfen. lastActiveSlot bleibt bewusst stehen (254 kommt
         // schon in der Vorbereitung, vor diesem Übergang).
         lastFilamentMapping = [];
+        lastSourceJobId = null;
+        lostContactDuringJob = false;
         addEvent(cfg.id, 'info', `Druck gestartet: ${snapshot.printFile ?? '–'}`);
       }
 
-      // Job-ID waehrend des Drucks merken → beim Abschluss senden (Dedup gegen Re-Emission)
+      // Job-ID während des Drucks merken → beim Abschluss senden (Dedup gegen Re-Emission)
       if (snapshot.status === 'printing' && snapshot.sourceJobId) lastSourceJobId = snapshot.sourceJobId;
 
-      prevStatus = snapshot.status;
+      if (snapshot.status === 'offline') {
+        if (prevStatus === 'printing' || prevStatus === 'paused') lostContactDuringJob = true;
+      } else {
+        prevStatus = snapshot.status;
+      }
 
       // Aktiven physischen Slot merken, SOBALD der Drucker ihn meldet (0–15 = AMS-Slot,
       // 254 = externe Spule; 255 = kein Tray → ignorieren, letzter bekannter zählt).
@@ -186,9 +228,7 @@ export async function runBridge(
           && lastActiveSlot !== snapshot.activeMqttSlot) {
         lastActiveSlot = snapshot.activeMqttSlot;
         // Sichtbare Diagnose im Ereignis-Log: welcher Slot würde aktuell gebucht?
-        const lbl = lastActiveSlot === 254 ? 'Externe Spule'
-          : `${String.fromCharCode(65 + Math.floor(lastActiveSlot / 4))}${(lastActiveSlot % 4) + 1}`;
-        addEvent(cfg.id, 'info', `Aktiver Filament-Slot: ${lbl}`);
+        addEvent(cfg.id, 'info', `Aktiver Filament-Slot: ${slotLabel(lastActiveSlot)}`);
       }
       // AMS-Status + ams_mapping während des Drucks merken (kommen nicht in jeder MQTT-Nachricht).
       if (snapshot.status === 'printing' && snapshot.amsSlots?.length) {
@@ -198,86 +238,18 @@ export async function runBridge(
         lastFilamentMapping = snapshot.filamentMapping;
       }
 
-      // Filament-Zuordnung: der filamentIndex aus dem Parser ist die SLICER-Filament-id (slice_info),
-      // NICHT der physische AMS-Slot. Reihenfolge der Strategien:
-      //  1. PRIMÄR & deterministisch: Bambu print.mapping (mapping[id-1] → Tray-Code; Code: unit=code>>8, slot=code&0xFF → global unit*4+slot)
-      //  2. Fallback Einfarb: aktiver physischer Slot (tray_now)
-      //  3. Fallback Mehrfarb: Zuordnung per Farbe gegen den AMS-Live-Status
-      // Quelle der Slot-Identität für diese Buchung (Stufe B): default Slicer-Reihenfolge,
-      // wird in den Bambu-AMS-Pfaden auf 'ams' angehoben. Künftig 'nfc'.
+      // Filament → physischer Slot (Strategien siehe resolveFilamentSlots). Quelle der
+      // Slot-Identität (Stufe B): 'ams' in den Bambu-AMS-Pfaden, sonst Slicer-Reihenfolge.
       let slotSource: SlotRef['source'] = 'slicer_order';
-      let mappedByAmsMapping = false;
-      if (eventType === 'job_complete' && snapshot.parsedFilamentWeights?.length && lastFilamentMapping.length) {
-        let cnt = 0;
-        // Der Mapping-Pfad zählt nur, wenn er MINDESTENS EINE verwertbare Zuordnung liefert.
-        // Sonst (z. B. Externe-Spule-Druck: Mapping ohne Eintrag für die Slicer-Filament-id)
-        // wurde der Slicer-Index bisher ROH als AMS-Index durchgereicht — bei vielen
-        // Slicer-Filamenten zeigt der auf einen realen fremden Slot (Bug Test 3: id 11 → C4).
-        let validCount = 0;
-        const remapped = snapshot.parsedFilamentWeights.map(fw => {
-          const code = lastFilamentMapping[fw.filamentIndex - 1];
-          if (code == null) return fw;
-          // Bambu: -1 = kein AMS (externe Spule), ≥65535 = ungenutzt/extern → beides 254
-          if (code < 0 || code >= 65535) { validCount++; return { ...fw, filamentIndex: 254 }; }
-          const amsUnit = (code >> 8) & 0xFF;
-          const slot = code & 0xFF;
-          if (amsUnit > 3 || slot > 3) return fw; // unerwartete Kodierung → roh lassen
-          validCount++;
-          const gi = amsUnit * 4 + slot;
-          if (gi !== fw.filamentIndex) cnt++;
-          return { ...fw, filamentIndex: gi };
+      if (eventType === 'job_complete' && snapshot.parsedFilamentWeights?.length) {
+        const resolved = resolveFilamentSlots(snapshot.parsedFilamentWeights, {
+          filamentMapping: lastFilamentMapping,
+          activeSlot: lastActiveSlot,
+          amsSlots: snapshot.amsSlots?.length ? snapshot.amsSlots : lastAmsSlots,
         });
-        if (validCount > 0) {
-          snapshot = { ...snapshot, parsedFilamentWeights: remapped };
-          mappedByAmsMapping = true;
-          slotSource = 'ams';
-          addEvent(cfg.id, 'info', `Filament-Zuordnung via Bambu ams_mapping (${remapped.length} Filament(e), ${cnt} korrigiert)`);
-        } else {
-          addEvent(cfg.id, 'info', 'ams_mapping ohne verwertbare Zuordnung — Fallback: aktiver Slot');
-        }
-      }
-
-      // Fallback Einfarb (nur ohne ams_mapping): Verbrauch dem aktiven physischen AMS-Slot zuordnen.
-      if (!mappedByAmsMapping && eventType === 'job_complete' && snapshot.parsedFilamentWeights?.length === 1) {
-        const fw = snapshot.parsedFilamentWeights[0];
-        if (lastActiveSlot != null) {
-          const slotLabel = lastActiveSlot === 254
-            ? 'Externe Spule'
-            : `${String.fromCharCode(65 + Math.floor(lastActiveSlot / 4))}${(lastActiveSlot % 4) + 1}`;
-          if (fw.filamentIndex !== lastActiveSlot) {
-            snapshot = { ...snapshot, parsedFilamentWeights: [{ ...fw, filamentIndex: lastActiveSlot }] };
-          }
-          slotSource = 'ams';
-          addEvent(cfg.id, 'info', `Filamentverbrauch → AMS-Slot ${slotLabel} (${fw.grams} g)`);
-        } else {
-          addEvent(cfg.id, 'warn', 'Aktiver AMS-Slot unbekannt — Filament evtl. nicht verknüpft');
-        }
-      }
-
-      // Fallback Mehrfarb (nur ohne ams_mapping): Zuordnung per Farbe gegen den AMS-Live-Status.
-      if (!mappedByAmsMapping && eventType === 'job_complete' && (snapshot.parsedFilamentWeights?.length ?? 0) > 1) {
-        const slots = snapshot.amsSlots?.length ? snapshot.amsSlots : lastAmsSlots;
-        if (slots.length) {
-          const normHex = (c?: string) => c ? '#' + c.replace(/^#/, '').replace(/^0x/i, '').slice(0, 6).toUpperCase() : '';
-          let remappedCount = 0;
-          const remapped = snapshot.parsedFilamentWeights!.map(fw => {
-            if (!fw.color) return fw;
-            const want = normHex(fw.color);
-            const matches = slots.filter(s => normHex(s.color) === want);
-            if (matches.length === 1) {
-              const gi = matches[0].ams_unit * 4 + matches[0].slot;
-              if (gi !== fw.filamentIndex) { remappedCount++; return { ...fw, filamentIndex: gi }; }
-            }
-            return fw;
-          });
-          if (remappedCount > 0) {
-            snapshot = { ...snapshot, parsedFilamentWeights: remapped };
-            slotSource = 'ams';
-            addEvent(cfg.id, 'info', `Mehrfarb-Druck: ${remappedCount} Filament(e) per Farbe dem AMS-Slot zugeordnet (Fallback)`);
-          }
-        } else {
-          addEvent(cfg.id, 'warn', 'Mehrfarb-Druck: kein ams_mapping/AMS-Status — Filamente evtl. nach Slicer-Reihenfolge zugeordnet');
-        }
+        snapshot = { ...snapshot, parsedFilamentWeights: resolved.weights };
+        slotSource = resolved.slotSource;
+        for (const e of resolved.log) addEvent(cfg.id, e.type, e.msg);
       }
 
       // Cloud-Gewicht via Bambu API NUR holen, wenn FTPS nichts geliefert hat.
@@ -294,7 +266,16 @@ export async function runBridge(
         ? { ...snapshot, status: 'printing' }
         : snapshot;
 
-      const printLogId = await push(cfg, pushSnapshot, eventType, durationMin, slotSource);
+      let printLogId: string | undefined;
+      try {
+        printLogId = await push(cfg, pushSnapshot, eventType, durationMin, slotSource);
+      } catch (err) {
+        if (eventType !== 'status_update') {
+          pendingJobEvent = { snapshot: pushSnapshot, eventType, durationMin, slotSource, attempts: 1 };
+          addEvent(cfg.id, 'warn', 'Job-Ende konnte nicht gesendet werden — wird wiederholt');
+        }
+        throw err;
+      }
       state.lastPushAt = new Date();
       state.error = null;
       consecutiveErrors = 0;
