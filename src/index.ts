@@ -1,15 +1,15 @@
 import open from 'open';
-import { loadMultiConfig, PrinterConfig, newPrinterId } from './config.js';
+import { loadMultiConfig, PrinterConfig } from './config.js';
 import { MoonrakerAdapter } from './adapters/moonraker.js';
 import { PrusaLinkAdapter } from './adapters/prusa.js';
 import { BambuAdapter } from './adapters/bambu.js';
-import { startServer, printerStates, PrinterBridgeState } from './server.js';
+import { startServer, printerStates, PrinterBridgeState, PORT } from './server.js';
 import { runBridge } from './bridge.js';
 import { Adapter } from './adapters/types.js';
 import { BRIDGE_VERSION } from './version.js';
+import { addEvent } from './events.js';
 
-const PORT = 7432;
-const URL  = `http://localhost:${PORT}`;
+const URL = `http://localhost:${PORT}`;
 
 console.log(`[flownt-bridge] v${BRIDGE_VERSION} startet…`);
 
@@ -42,10 +42,22 @@ function startPrinter(cfg: PrinterConfig): void {
     state = makePrinterState();
     printerStates.set(cfg.id, state);
   }
+  let adapter: Adapter;
+  try {
+    adapter = buildAdapter(cfg);
+  } catch (err) {
+    // Ungültige Konfiguration eines Druckers darf den Start der übrigen nicht verhindern.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[flownt-bridge] ${msg}`);
+    runningBridges.delete(cfg.id);
+    state.running = false;
+    state.adapter = null;
+    state.error   = msg;
+    addEvent(cfg.id, 'warn', msg);
+    return;
+  }
   state.running = true;
   state.error   = null;
-
-  const adapter = buildAdapter(cfg);
   state.adapter = adapter;
 
   let cancelled = false;
