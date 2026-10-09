@@ -15,11 +15,13 @@ Adapter **emittieren keine Events**, sie liefern **Zustands-Snapshots**:
 - `runBridge()` (`src/bridge.ts`) pollt den Snapshot, **erkennt Übergänge** und sendet typisierte
   Events an die Flownt Edge Function `bridge-ingest`. Vorteil: die Event-Ableitung ist **zentral**
   und damit über alle Adapter konsistent.
+- Die reine Logik dahinter (Übergangs-Erkennung `classifyTransition`, Filament→Slot-Zuordnung
+  `resolveFilamentSlots`) liegt seiteneffektfrei in `src/job-events.ts` und ist unit-getestet (`test/`).
 
 ## Single Source of Truth
 
 - **Zustand:** `PrinterSnapshot` (`src/adapters/types.ts`) — Status, Temps, Fortschritt, AMS, `jobResult`,
-  `parsedFilamentWeights`, Energie/Leistung. Beide Adapter implementieren das.
+  `parsedFilamentWeights`, Energie/Leistung. Alle drei Adapter implementieren das.
 - **Wire-/Event-Vertrag:** `src/contract.ts` — `EventType`, `IngestBody`, `SlotRef`, `MaterialLine`.
   `bridge.ts` baut ausschließlich diese Typen (kein `Record<string,unknown>` mehr).
 
@@ -27,24 +29,32 @@ Adapter **emittieren keine Events**, sie liefern **Zustands-Snapshots**:
 
 `heartbeat` · `status_update` · `job_complete` · `job_failed`
 
-Job-Ende = Übergang **(printing|paused) → (idle|error)**. Der Ausgang kommt aus dem vom Adapter
-normalisierten `PrinterSnapshot.jobResult` (`completed|aborted|failed`; Fallback: `error→failed`,
-`idle→completed`):
+Job-Ende = Übergang **(printing|paused) → (idle|error)**. `offline` ist **kein** Übergang: verglichen
+wird mit dem letzten Status ≠ offline, damit ein Verbindungsabriss mitten im Druck weder das Job-Ende
+verschluckt noch den Druck neu startet. Der Ausgang kommt aus dem vom Adapter normalisierten
+`PrinterSnapshot.jobResult` (`completed|aborted|failed`; Fallback: `error→failed`, `idle→completed`
+bzw. `aborted`, wenn während des Drucks die Verbindung verloren ging):
 - `completed` → `job_complete` (Materialabzug).
 - `aborted|failed` → `job_failed` (**kein** Materialabzug; Dauer + gemessene Energie werden geloggt,
   Backend legt einen `aborted`-Drucklog an).
+- Schlägt der Push eines Job-Endes fehl, wird er vor dem nächsten Poll erneut gesendet (max. 10 Versuche).
+  `source_job_id` (nur Bambu, nur `job_complete`) erlaubt dem Backend die Dedup; Bambu-Job-ID `"0"`
+  (lokaler/SD-Druck) gilt als „keine ID".
 
 `job_started`/`state_changed`/`spool_assigned` sind **bewusst nicht** als eigene Events ausgeführt —
 sie stecken in `status_update` + `printer_status`; das Spulen-Matching passiert backend-seitig.
 
 ## Material & Slot-Identität (`MaterialLine` / `SlotRef`)
 
-- **Gewichtsquelle vereinheitlicht:** beide Adapter parsen die Druckdatei mit demselben
+- **Gewichtsquelle vereinheitlicht:** alle Adapter parsen die Druckdatei mit demselben
   `parseFileBuffer` (3MF slice_info / Slic3r_PE / GCode); `measureSource` (`slicer_file|bambu_cloud`)
   führt die Quelle als Metadatum mit.
 - **Vendor-abstrahierte Slot-Referenz:** `SlotRef { source: 'ams'|'slicer_order'|'nfc', value }`.
-  Bambu-AMS-Pfade setzen `source:'ams'` (value = globaler AMS-Index unit*4+slot); Moonraker
-  `source:'slicer_order'` (value = Slicer-Reihenfolge). NFC ist künftig nur ein weiterer `source`.
+  Bambu-AMS-Pfade setzen `source:'ams'` (value = globaler AMS-Index unit*4+slot, 254 = externe Spule);
+  Moonraker/Prusa `source:'slicer_order'` (value = Slicer-Reihenfolge). NFC ist künftig nur ein weiterer `source`.
+- **Bambu-Zuordnung** (`resolveFilamentSlots`): 1. `ams_mapping` des laufenden Drucks (nur wenn ≥1 Eintrag
+  verwertbar ist; wird bei Druckstart verworfen) → 2. Einfarb: aktiver Slot `tray_now` (sticky, auch 254)
+  → 3. Mehrfarb: eindeutiger Farbtreffer gegen den AMS-Status → sonst Slicer-Reihenfolge.
 - `filamentIndex` bleibt als **Kompat-Feld** erhalten — `bridge-ingest` löst heute darüber
   `(unit,slot)` auf (`unit=⌊idx/4⌋`, `slot=idx%4`) → `printer_ams_slots` → Lagerort → Spule → Abzug.
 
@@ -53,7 +63,7 @@ sie stecken in `status_update` + `printer_status`; das Spulen-Matching passiert 
 | Aspekt | Bambu (`bambu.ts`) | Moonraker (`moonraker.ts`) | Prusa Link (`prusa.ts`) |
 |---|---|---|---|
 | Transport | MQTT 8883 + FTPS 990 | HTTP (`/printer/objects/query`, `/server/files/gcodes`) | HTTP (`/api/v1/status`, `/api/v1/job`, X-Api-Key) |
-| Status | `gcode_state` → `mapState` | `print_stats.state` → `mapState` | `printer.state` → `mapState` (ATTENTION+Job = paused) |
+| Status | `gcode_state` → `mapState`; MQTT-Deltas ohne `gcode_state` behalten den Status (`applyReport`) | `print_stats.state` → `mapState` | `printer.state` → `mapState` (ATTENTION+Job = paused) |
 | `jobResult` | `FINISH→completed`, `FAILED→failed` (Stop meldet FAILED) | `complete→completed`, `cancelled→aborted`, `error→failed` | `FINISHED→completed`, `STOPPED→aborted`, `ERROR→failed` |
 | Slot-Identität | AMS (ams_mapping/aktiver Slot/Farbe) → `source:'ams'` | Slicer-Reihenfolge → `source:'slicer_order'`; Lagerort via „Material-Slots" in der App | wie Moonraker (Material-Slots) |
 | Befehle | Pause/Resume/Stop | — | — |
@@ -74,7 +84,7 @@ Umgesetzt in 3 Stufen: **A** Vertrag typisiert · **B** `SlotRef`/`MaterialLine`
 
 ## Versionierung & Versions-Awareness
 
-**Single Source der Bridge-Version:** `src/version.ts` (`BRIDGE_VERSION`). Bei jedem Release zusammen
+**Single Source der Bridge-Version:** `src/version.ts` (`BRIDGE_VERSION`, aktuell 0.9.5). Bei jedem Release zusammen
 mit `package.json` `"version"` anheben — und in der App `RECOMMENDED_BRIDGE_VERSION` in
 `src/lib/version.ts`.
 

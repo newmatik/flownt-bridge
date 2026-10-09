@@ -1,16 +1,21 @@
 # Flownt Bridge
 
-Connects your 3D printer to Flownt in real time — live status, temperatures, progress, and automatic print log entries.
+Connects your 3D printers to Flownt in real time — live status, temperatures, progress, and automatic print log entries. It can also act as a local label-printing helper (Dymo) for Flownt.
+
+Current version: **0.9.5** (see `src/version.ts`).
 
 ## Supported Printers
 
 | Printer | Status |
 |---|---|
-| Bambu Lab (X1, P1, A1, …) | ✅ |
-| Klipper / Moonraker | ✅ |
-| Prusa Link (MK4, XL, MINI, Core One) | ✅ (v0.5.0) |
-| Anycubic Kobra (X, S1) | 🧪 In testing |
-| OctoPrint | 🔜 Coming soon |
+| Bambu Lab (X1, P1, A1, H2D, …) — MQTT + FTPS | ✅ (incl. AMS, pause/resume/stop) |
+| Klipper / Moonraker — HTTP | ✅ (read-only) |
+| Prusa Link (MK4, XL, MINI, Core One) — HTTP | ✅ read-only, since v0.5.0 |
+| Anycubic Kobra (X, S1) | 🧪 Spike on branch `spike/anycubic-lan`, not in releases |
+| OctoPrint | 🔜 Planned |
+
+Optional per printer: a **Shelly** smart plug (Gen 1–4) for real power/energy metering, and
+**Bambu Cloud** credentials as a fallback source for filament weight.
 
 ---
 
@@ -26,7 +31,7 @@ ein und startet die Bridge. Erneut ausführen = auf neueste Version aktualisiere
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Buba2017/flownt-bridge/main/install.sh | bash
 ```
-*(Für einen System-Dienst auf dem Pi mit `sudo bash` davor ausführen.)*
+*(Für einen System-Dienst auf dem Raspberry Pi stattdessen `… | sudo bash` — siehe unten.)*
 
 **Windows** (PowerShell):
 ```powershell
@@ -58,18 +63,24 @@ chmod +x flownt-bridge-macos-arm64 && xattr -d com.apple.quarantine flownt-bridg
 
 ---
 
-### Option C – Aus dem Quellcode (Node.js 18+)
+### Option C – Aus dem Quellcode (Node.js 18+, empfohlen 20)
 
 ```bash
 git clone https://github.com/Buba2017/flownt-bridge.git
 cd flownt-bridge && npm install && npm start
 ```
 
+Die Web-UI läuft auf Port **7432**; ein anderer Port lässt sich per Umgebungsvariable
+`FLOWNT_BRIDGE_PORT` setzen. Die Konfiguration liegt in `~/.flownt-bridge/config.json`
+(wird über die Web-UI gepflegt, nicht von Hand).
+
 ---
 
 ## Setup
 
-After starting, the browser opens `http://localhost:7432` automatically.
+Open `http://localhost:7432` (on a fresh install with a desktop the browser opens it automatically).
+A fresh bridge first asks for its role — **monitor printers**, **print labels**, or **both** — then
+leads you to **Settings → + Printer**.
 
 ### Flownt Auth Token
 
@@ -114,41 +125,39 @@ Read-only: live status, progress, temperatures, ETA, and automatic print logs wi
 
 ## Raspberry Pi — Autostart (empfohlen)
 
-Für einen dauerhaften Betrieb auf einem Raspberry Pi (Zero 2 W, Pi 3, Pi 4):
-
-**Voraussetzung:** Raspberry Pi OS (Bookworm oder Bullseye, 32- oder 64-bit)
+Für den Dauerbetrieb auf einem Raspberry Pi (64-bit Raspberry Pi OS, z. B. Pi 3/4/5 oder
+Zero 2 W) den Ein-Befehl-Installer **als root** ausführen:
 
 ```bash
-git clone https://github.com/Buba2017/flownt-bridge.git
-cd flownt-bridge
-npm install
-npm run build
-sudo bash install.sh
+curl -fsSL https://raw.githubusercontent.com/Buba2017/flownt-bridge/main/install.sh | sudo bash
 ```
 
 Der Installer:
-- Installiert Node.js 20 automatisch (falls nicht vorhanden)
-- Kopiert die Bridge nach `/opt/flownt-bridge/`
-- Richtet einen systemd-Service ein (startet automatisch beim Boot, neustart bei Absturz)
+- lädt die fertige Binary (`flownt-bridge-linux-arm64`) aus den Releases — Node.js wird **nicht** benötigt
+- legt sie nach `/opt/flownt-bridge/`
+- richtet einen systemd-System-Dienst ein (startet beim Boot, Neustart bei Absturz) und startet ihn
+
+Ohne `sudo` wird stattdessen ein systemd-User-Dienst unter `~/.flownt-bridge/` eingerichtet.
+Ein 32-bit-OS wird nicht unterstützt (es gibt kein `linux-armv7`-Release).
 
 Danach erreichbar unter `http://<Pi-IP-Adresse>:7432` — im Browser auf jedem Gerät im Heimnetz.
 
 ```bash
-journalctl -fu flownt-bridge      # Live-Logs
-sudo systemctl stop flownt-bridge  # Stoppen
+journalctl -fu flownt-bridge          # Live-Logs
+sudo systemctl stop flownt-bridge     # Stoppen
 sudo systemctl restart flownt-bridge  # Neustarten
 ```
 
-**Update:**
-```bash
-git pull && npm run build && sudo bash install.sh
-```
+**Update:** denselben Installer-Befehl erneut ausführen.
+**Entfernen** (System-Dienst): `sudo bash uninstall.sh` aus dem Repo — die Konfiguration
+in `~/.flownt-bridge/` bleibt erhalten.
 
 ---
 
 ## Mac/Windows — Keep the Bridge running (optional)
 
-By default the bridge only runs while the window is open.
+Only needed for Option B/C — the one-line installer (Option A) already sets up autostart.
+A manually started binary or `npm start` only runs while its window is open.
 
 ```bash
 npm install -g pm2
@@ -195,11 +204,11 @@ The status page shows:
 
 | Section | Details |
 |---|---|
-| Printer status | idle / printing / offline with filename, progress %, temperatures |
+| Printer status | idle / printing / paused / error / offline with filename, progress %, temperatures |
 | AMS slots | Color circles per slot, material name, remaining %, active slot highlighted |
 | ETA | Formatted remaining print time (e.g. `1h 23m`) |
 | AMS humidity | Humidity level (1–5, 5=dry) + real relative humidity % (from `ams.humidity_raw`) + temperature per AMS unit |
-| Events | Last 30 events, color-coded: ✓ green (success) · ℹ gray (info) · ⚠ orange (warning) |
+| Events | Last 8 events (the bridge keeps 30 per printer, see `/api/state`), color-coded: ✓ green (success) · ℹ gray (info) · ⚠ orange (warning) |
 
 The page auto-refreshes every 8 seconds.
 
@@ -210,8 +219,12 @@ The page auto-refreshes every 8 seconds.
 - `✓ Druckdatei geladen: <filename> (N Slot(s))` — when FTPS file download succeeds
 - `⚠ Druckdatei nicht via FTPS gefunden` — when all FTPS paths fail
 - `✓ Drucklog erstellt: <filename>` — after job_complete lands in Flownt
+- `⚠ Druck abgebrochen/fehlgeschlagen — kein Materialabzug` — on job_failed
 
-**JSON API:** `http://localhost:7432/api/state` — returns the full printer snapshot + event log as JSON.
+**JSON API:**
+- `GET /api/state` — printer snapshots + event log as JSON
+- `GET /api/version` — `{ "version": "x.y.z" }`
+- `POST /printer/command` — `{ "type": "pause" | "resume" | "stop", "printerId"?: "…" }` (Bambu only)
 
 ---
 
@@ -221,7 +234,7 @@ The bridge enables direct label printing from the browser, bypassing Dymo Connec
 
 1. Flownt sends the print job to `http://localhost:7432/dymo/print`
 2. The bridge tries the Dymo Connect REST API first (port 41951)
-3. If that fails: automatic fallback via the macOS CUPS driver
+3. If that fails: automatic fallback via the CUPS driver (`lp`; the PNG is resized with `sips`, so this fallback is **macOS-only**)
 
 **Requirements for CUPS fallback:**
 - Dymo LabelWriter set up in macOS System Settings → Printers
@@ -237,20 +250,31 @@ The bridge enables direct label printing from the browser, bypassing Dymo Connec
 ## Architecture
 
 ```
-Printer (LAN)  ←MQTT/REST→  Flownt Bridge (local)  ←HTTPS→  Flownt Cloud
-Browser        ←HTTP→       Flownt Bridge (port 7432) → CUPS → Printer
+Printer (LAN)  ←MQTT/FTPS/HTTP→  Flownt Bridge (local)  ←HTTPS→  Flownt Cloud
+Browser        ←HTTP→            Flownt Bridge (port 7432) → CUPS → Label printer
 ```
 
 The bridge initiates all connections outbound. No ports need to be opened on your router.
+The web UI listens on all interfaces (port 7432) so a headless Pi can be configured from another
+device — keep it inside your LAN. Data contract and event derivation: see [CONTEXT.md](CONTEXT.md).
 
 ---
 
-## For developers – build the binary yourself
+## Development
 
 ```bash
 npm install
-npm run package        # all platforms
+npm start              # run from source (tsx)
+npm run dev            # same, with watch mode
+npm test               # unit tests (Vitest)
+npm run typecheck      # tsc --noEmit
+npm run build          # bundle to dist/bundle.cjs (esbuild)
+npm run package        # standalone binaries for all platforms (pkg)
 npm run package:mac    # macOS arm64 only (faster)
 ```
 
-Binaries are written to `dist/`.
+Binaries are written to `dist/`. CI (`.github/workflows/ci.yml`) runs typecheck, tests and build
+on every pull request and on `main`.
+
+- `src/contract.ts` is a **generated copy** from the main Flownt repo — never edit it here.
+- On a release bump the version in **both** `package.json` and `src/version.ts`.
