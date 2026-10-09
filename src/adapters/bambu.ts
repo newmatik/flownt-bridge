@@ -144,7 +144,7 @@ export function applyReport(
 ): { snapshot: PrinterSnapshot; status: PrinterStatus; isNewPrint: boolean } {
   const hasState = typeof p.gcode_state === 'string';
   const status = hasState ? mapState(p.gcode_state || 'IDLE') : reportedStatus;
-  const isNewPrint = !isActive(reportedStatus) && status === 'printing';
+  const isNewPrint = !isActive(reportedStatus) && isActive(status);
 
   const trayNow = parseTrayNow(p.ams?.tray_now);
   const amsSlots = parseAmsSlots(p.ams);

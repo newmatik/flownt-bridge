@@ -39,7 +39,9 @@ export function classifyTransition(
       ?? (status === 'error' ? 'failed' : lostContactDuringJob ? 'aborted' : 'completed');
     return { kind: 'ended', outcome, eventType: outcome === 'completed' ? 'job_complete' : 'job_failed' };
   }
-  if (status === 'printing' && !isActive(prevStatus)) return { kind: 'started' };
+  // Auch idle → paused ist ein Druckstart (Bridge startet während einer Pause, oder der
+  // Druck wurde zwischen zwei Polls pausiert) — sonst erbte der Job den Vordruck-Zustand.
+  if (isActive(status) && !isActive(prevStatus)) return { kind: 'started' };
   return { kind: 'none' };
 }
 

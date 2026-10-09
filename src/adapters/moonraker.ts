@@ -91,7 +91,8 @@ export class MoonrakerAdapter implements Adapter {
       const printerStatus = mapState(ps?.state ?? 'standby');
 
       // Druckdatei bei idle→printing herunterladen
-      const isNewPrint = this.prevStatus !== 'printing' && this.prevStatus !== 'paused' && printerStatus === 'printing';
+      const isNewPrint = this.prevStatus !== 'printing' && this.prevStatus !== 'paused'
+        && (printerStatus === 'printing' || printerStatus === 'paused');
       if (isNewPrint) {
         this.parsedFilamentWeights = null;
         if (ps?.filename) {

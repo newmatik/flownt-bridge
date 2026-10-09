@@ -37,7 +37,8 @@ bzw. `aborted`, wenn während des Drucks die Verbindung verloren ging):
 - `completed` → `job_complete` (Materialabzug).
 - `aborted|failed` → `job_failed` (**kein** Materialabzug; Dauer + gemessene Energie werden geloggt,
   Backend legt einen `aborted`-Drucklog an).
-- Schlägt der Push eines Job-Endes fehl, wird er vor dem nächsten Poll erneut gesendet (max. 10 Versuche).
+- Schlägt der Push eines Job-Endes fehl, wird er neben dem normalen Polling mit wachsendem Abstand erneut gesendet (bis 6 h). Wiederholt wird nur, was sicher nicht angekommen ist (Verbindungsaufbau gescheitert, HTTP-Fehlerantwort) oder was das Backend über `source_job_id` dedupen kann; bei Timeout ohne Job-ID gibt es stattdessen eine Warnung im Ereignis-Log, damit kein doppelter Drucklog mit doppeltem Materialabzug entsteht (`canRetryJobEvent`).
+- Ein Job, der zuerst als `paused` gesehen wird (Bridge-Start während einer Pause), zählt als neuer Druck.
   `source_job_id` (nur Bambu, nur `job_complete`) erlaubt dem Backend die Dedup; Bambu-Job-ID `"0"`
   (lokaler/SD-Druck) gilt als „keine ID".
 

@@ -18,6 +18,12 @@ describe('classifyTransition', () => {
     }
   });
 
+  it('treats a job first seen as paused as a new print', () => {
+    for (const prev of ['idle', null, 'error'] as const) {
+      expect(classifyTransition(prev, { status: 'paused' })).toEqual({ kind: 'started' });
+    }
+  });
+
   it('does not restart on printing → printing or paused → printing', () => {
     expect(classifyTransition('printing', { status: 'printing' })).toEqual({ kind: 'none' });
     expect(classifyTransition('paused', { status: 'printing' })).toEqual({ kind: 'none' });

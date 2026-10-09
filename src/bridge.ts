@@ -49,18 +49,50 @@ async function push(
     if (snapshot.energyWhUsed != null) body.energy_wh = snapshot.energyWhUsed;
   }
 
-  const res = await fetch(`${FLOWNT_EDGE_URL}/bridge-ingest`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(10_000),
-  });
+  let res: Awaited<ReturnType<typeof fetch>>;
+  try {
+    res = await fetch(`${FLOWNT_EDGE_URL}/bridge-ingest`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (err) {
+    throw new PushError(String(err), mayHaveReachedServer(err));
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`bridge-ingest ${res.status}: ${text}`);
+    // Der Server hat mit einem Fehler geantwortet → nichts verbucht, Wiederholung ist sicher.
+    throw new PushError(`bridge-ingest ${res.status}: ${text}`, false);
   }
   const data = await res.json().catch(() => ({})) as Record<string, unknown>;
   return typeof data.print_log_id === 'string' ? data.print_log_id : undefined;
+}
+
+/** Push-Fehler mit der Info, ob der Request den Server evtl. doch erreicht hat. */
+export class PushError extends Error {
+  constructor(message: string, readonly maybeDelivered: boolean) {
+    super(message);
+  }
+}
+
+// Verbindungsaufbau gescheitert (DNS, refused, offline) → Request kam sicher nicht an.
+// Timeout oder Abbruch mitten in der Antwort → Server hat evtl. schon verbucht.
+const NOT_SENT_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH', 'UND_ERR_CONNECT_TIMEOUT']);
+export function mayHaveReachedServer(err: unknown): boolean {
+  const e = err as { code?: string; cause?: { code?: string } } | null;
+  const code = e?.code ?? e?.cause?.code;
+  return !(code && NOT_SENT_CODES.has(code));
+}
+
+/**
+ * Darf ein fehlgeschlagenes Job-Ende wiederholt werden? Nur wenn es sicher nicht
+ * angekommen ist oder das Backend die Wiederholung über source_job_id dedupen kann —
+ * sonst droht ein doppelter Drucklog mit doppeltem Materialabzug.
+ */
+export function canRetryJobEvent(err: unknown, eventType: EventType, sourceJobId?: string | null): boolean {
+  if (err instanceof PushError && !err.maybeDelivered) return true;
+  return eventType === 'job_complete' && !!sourceJobId;
 }
 
 function sleep(ms: number) {
@@ -73,9 +105,13 @@ interface PendingJobEvent {
   durationMin?: number;
   slotSource: SlotRef['source'];
   attempts: number;
+  firstFailedAt: number;
+  nextAttemptAt: number;
 }
 
-const MAX_JOB_EVENT_ATTEMPTS = 10; // danach aufgeben, damit Status-Updates nicht dauerhaft blockiert sind
+const JOB_EVENT_RETRY_MAX_AGE_MS = 6 * 60 * 60_000; // nach 6 h aufgeben
+const JOB_EVENT_RETRY_MAX_DELAY_MS = 5 * 60_000;
+const MAX_PENDING_JOB_EVENTS = 20;
 
 export async function runBridge(
   adapter: Adapter,
@@ -124,26 +160,35 @@ export async function runBridge(
   let lastFilamentMapping: number[] = [];     // Bambu print.mapping (Slicer-Filament-id → physischer Tray-Code) — primäre, deterministische Zuordnung
   let lastEnergyWh: number | null = null;     // letzter Energiezähler-Stand vom Smart-Plug (Wh)
   let energyStartWh: number | null = null;    // Zählerstand bei Druckstart (für Verbrauchs-Differenz)
-  // Job-Ende, dessen Push fehlgeschlagen ist: wird vor dem nächsten Poll erneut gesendet,
-  // sonst ginge der Drucklog bei einem kurzen Netzwerkfehler am Druckende verloren
-  // (der Übergang ist danach schon „verbraucht"). Backend dedupt über source_job_id.
-  let pendingJobEvent = null as PendingJobEvent | null;
+  // Job-Enden, deren Push fehlgeschlagen ist: werden neben dem normalen Polling erneut
+  // gesendet, sonst ginge der Drucklog bei einem Netzwerkfehler am Druckende verloren
+  // (der Übergang ist danach schon „verbraucht"). Siehe canRetryJobEvent.
+  const pendingJobEvents: PendingJobEvent[] = [];
+  const schedule = (p: PendingJobEvent) => {
+    p.nextAttemptAt = Date.now() + Math.min(p.attempts * 30_000, JOB_EVENT_RETRY_MAX_DELAY_MS);
+  };
 
   while (!isCancelled()) {
     try {
-      if (pendingJobEvent) {
-        const p = pendingJobEvent;
+      // Ausstehende Job-Enden nachmelden — blockiert das Polling nicht, damit ein
+      // weiterer Druck während eines längeren Ausfalls trotzdem erkannt wird.
+      for (const p of [...pendingJobEvents]) {
+        if (Date.now() < p.nextAttemptAt) continue;
         p.attempts++;
+        const file = p.snapshot.printFile ?? '–';
         try {
           await push(cfg, p.snapshot, p.eventType, p.durationMin, p.slotSource);
-          pendingJobEvent = null;
-          addEvent(cfg.id, 'success', `Job-Ende nachgemeldet: ${p.snapshot.printFile ?? '–'}`);
+          pendingJobEvents.splice(pendingJobEvents.indexOf(p), 1);
+          addEvent(cfg.id, 'success', `Job-Ende nachgemeldet: ${file}`);
         } catch (err) {
-          if (p.attempts >= MAX_JOB_EVENT_ATTEMPTS) {
-            pendingJobEvent = null;
-            addEvent(cfg.id, 'warn', `Job-Ende nach ${p.attempts} Versuchen verworfen: ${p.snapshot.printFile ?? '–'}`);
+          if (!canRetryJobEvent(err, p.eventType, p.snapshot.sourceJobId)
+              || Date.now() - p.firstFailedAt > JOB_EVENT_RETRY_MAX_AGE_MS) {
+            pendingJobEvents.splice(pendingJobEvents.indexOf(p), 1);
+            addEvent(cfg.id, 'warn', `Job-Ende evtl. nicht in Flownt angekommen — bitte Drucklog prüfen: ${file}`);
+          } else {
+            schedule(p);
           }
-          throw err;
+          console.error(`[${cfg.name}] Nachmelden fehlgeschlagen (${p.attempts}×):`, err);
         }
       }
 
@@ -271,8 +316,17 @@ export async function runBridge(
         printLogId = await push(cfg, pushSnapshot, eventType, durationMin, slotSource);
       } catch (err) {
         if (eventType !== 'status_update') {
-          pendingJobEvent = { snapshot: pushSnapshot, eventType, durationMin, slotSource, attempts: 1 };
-          addEvent(cfg.id, 'warn', 'Job-Ende konnte nicht gesendet werden — wird wiederholt');
+          const file = pushSnapshot.printFile ?? '–';
+          if (canRetryJobEvent(err, eventType, pushSnapshot.sourceJobId)) {
+            const now = Date.now();
+            const p: PendingJobEvent = { snapshot: pushSnapshot, eventType, durationMin, slotSource, attempts: 1, firstFailedAt: now, nextAttemptAt: now };
+            schedule(p);
+            pendingJobEvents.push(p);
+            if (pendingJobEvents.length > MAX_PENDING_JOB_EVENTS) pendingJobEvents.shift();
+            addEvent(cfg.id, 'warn', `Job-Ende konnte nicht gesendet werden — wird wiederholt: ${file}`);
+          } else {
+            addEvent(cfg.id, 'warn', `Job-Ende evtl. nicht in Flownt angekommen — bitte Drucklog prüfen: ${file}`);
+          }
         }
         throw err;
       }

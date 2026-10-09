@@ -116,7 +116,8 @@ export class PrusaLinkAdapter implements Adapter {
       const hasJob = body.job != null;
       const printerStatus = mapState(state, hasJob);
 
-      const isNewPrint = this.prevStatus !== 'printing' && this.prevStatus !== 'paused' && printerStatus === 'printing';
+      const isNewPrint = this.prevStatus !== 'printing' && this.prevStatus !== 'paused'
+        && (printerStatus === 'printing' || printerStatus === 'paused');
       if (isNewPrint) {
         this.parsedFilamentWeights = null;
         this.currentFileName = null;
