@@ -149,8 +149,11 @@ sudo systemctl restart flownt-bridge  # Neustarten
 ```
 
 **Update:** denselben Installer-Befehl erneut ausführen.
-**Entfernen** (System-Dienst): `sudo bash uninstall.sh` aus dem Repo — die Konfiguration
-in `~/.flownt-bridge/` bleibt erhalten.
+**Entfernen** (System-Dienst):
+```bash
+curl -fsSL https://raw.githubusercontent.com/Buba2017/flownt-bridge/main/uninstall.sh | sudo bash
+```
+Die Konfiguration in `~/.flownt-bridge/` bleibt erhalten.
 
 ---
 
@@ -273,8 +276,7 @@ npm run package        # standalone binaries for all platforms (pkg)
 npm run package:mac    # macOS arm64 only (faster)
 ```
 
-Binaries are written to `dist/`. CI (`.github/workflows/ci.yml`) runs typecheck, tests and build
-on every pull request and on `main`.
+Binaries are written to `dist/`.
 
 - `src/contract.ts` is a **generated copy** from the main Flownt repo — never edit it here.
 - On a release bump the version in **both** `package.json` and `src/version.ts`.

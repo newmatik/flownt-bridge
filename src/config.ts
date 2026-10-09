@@ -85,6 +85,9 @@ export function normalizeConfig(raw: Record<string, unknown>): MultiConfig {
           adapterUrl: typeof p.adapterUrl === 'string' ? p.adapterUrl : '',
           adapterApiKey: typeof p.adapterApiKey === 'string' ? p.adapterApiKey : '',
           adapterSerial: typeof p.adapterSerial === 'string' ? p.adapterSerial : '',
+          bambuCloudEmail: typeof p.bambuCloudEmail === 'string' ? p.bambuCloudEmail : undefined,
+          bambuCloudPassword: typeof p.bambuCloudPassword === 'string' ? p.bambuCloudPassword : undefined,
+          smartPlugUrl: typeof p.smartPlugUrl === 'string' ? p.smartPlugUrl : undefined,
           pollingIntervalMs: Number.isFinite(polling) && polling >= MIN_POLLING_MS ? polling : DEFAULT_POLLING_MS,
         };
       }),
@@ -102,8 +105,10 @@ export function loadMultiConfig(): MultiConfig {
   } catch (err) {
     // Kaputte Datei NICHT still als „leer" behandeln: der nächste Speichervorgang würde
     // sonst alle Drucker überschreiben. Zur Seite legen, dann leer weitermachen.
+    // Schlägt das Verschieben fehl, abbrechen statt leer weiterzumachen — sonst wäre die
+    // einzige (reparierbare) Kopie beim nächsten Speichern weg.
     const backup = `${CONFIG_FILE}.broken-${Date.now()}`;
-    try { renameSync(CONFIG_FILE, backup); } catch { /* ignore */ }
+    renameSync(CONFIG_FILE, backup);
     console.error(`[config] ${CONFIG_FILE} ist unlesbar (${String(err)}) — verschoben nach ${backup}`);
     return emptyConfig();
   }
@@ -118,7 +123,7 @@ export function saveMultiConfig(cfg: MultiConfig): void {
   if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
   // Atomar schreiben (tmp + rename): ein Absturz mitten im Schreiben hinterlässt sonst
   // eine halbe Datei. 0600, weil Access Codes/Passwörter drinstehen.
-  const tmp = `${CONFIG_FILE}.tmp`;
+  const tmp = join(CONFIG_DIR, `.config.json.${process.pid}.${randomUUID()}.tmp`);
   writeFileSync(tmp, JSON.stringify(cfg, null, 2), { encoding: 'utf-8', mode: 0o600 });
   renameSync(tmp, CONFIG_FILE);
 }
