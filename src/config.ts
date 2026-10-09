@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
@@ -20,7 +20,7 @@ export interface PrinterConfig {
   pollingIntervalMs: number;
   bambuCloudEmail?: string;
   bambuCloudPassword?: string;
-  // Optionaler Smart-Plug zur echten Strommessung (Shelly Gen1 + Gen2, Auto-Erkennung).
+  // Optionaler Smart-Plug zur echten Strommessung (Shelly Gen1 + Gen2/3/4, Auto-Erkennung).
   smartPlugType?: SmartPlugType;
   smartPlugUrl?: string; // IP/Host des Shelly im LAN, z. B. "192.168.178.50"
 }
@@ -58,23 +58,69 @@ function migrate(raw: Record<string, unknown>): MultiConfig {
   };
 }
 
+const DEFAULT_POLLING_MS = 30_000;
+const MIN_POLLING_MS = 5_000;
+
+const emptyConfig = (): MultiConfig => ({ version: 2, language: 'de', printers: [] });
+
+/**
+ * Bringt eine gelesene (ggf. von Hand editierte) v2-Konfiguration in eine sichere Form:
+ * fehlende Listen/Felder werden ergänzt, Nicht-Objekte bzw. Einträge ohne id verworfen.
+ * Ungültige Adapter-Typen bleiben erhalten — index.ts meldet sie pro Drucker als Fehler.
+ */
+export function normalizeConfig(raw: Record<string, unknown>): MultiConfig {
+  const printers = Array.isArray(raw.printers) ? raw.printers : [];
+  const role = raw.role === 'monitor' || raw.role === 'label' || raw.role === 'both' ? raw.role : undefined;
+  return {
+    version: 2,
+    language: raw.language === 'en' ? 'en' : 'de',
+    printers: printers
+      .filter((p): p is Record<string, unknown> => !!p && typeof p === 'object' && typeof (p as { id?: unknown }).id === 'string')
+      .map(p => {
+        const polling = Number(p.pollingIntervalMs);
+        return {
+          ...(p as unknown as PrinterConfig),
+          name: typeof p.name === 'string' && p.name ? p.name : 'Drucker',
+          flowntAuthToken: typeof p.flowntAuthToken === 'string' ? p.flowntAuthToken : '',
+          adapterUrl: typeof p.adapterUrl === 'string' ? p.adapterUrl : '',
+          adapterApiKey: typeof p.adapterApiKey === 'string' ? p.adapterApiKey : '',
+          adapterSerial: typeof p.adapterSerial === 'string' ? p.adapterSerial : '',
+          pollingIntervalMs: Number.isFinite(polling) && polling >= MIN_POLLING_MS ? polling : DEFAULT_POLLING_MS,
+        };
+      }),
+    ...(role ? { role } : {}),
+    ...(typeof raw.labelPrinter === 'string' && raw.labelPrinter ? { labelPrinter: raw.labelPrinter } : {}),
+  };
+}
+
 export function loadMultiConfig(): MultiConfig {
-  if (!existsSync(CONFIG_FILE)) return { version: 2, language: 'de', printers: [] };
+  if (!existsSync(CONFIG_FILE)) return emptyConfig();
+  let raw: Record<string, unknown>;
   try {
-    const raw = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8')) as Record<string, unknown>;
-    if (raw.version === 2) return raw as unknown as MultiConfig;
-    // Legacy single-printer format → auto-migrate and persist
-    const cfg = migrate(raw);
-    saveMultiConfig(cfg);
-    return cfg;
-  } catch {
-    return { version: 2, language: 'de', printers: [] };
+    raw = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8')) as Record<string, unknown>;
+    if (!raw || typeof raw !== 'object') throw new Error('kein JSON-Objekt');
+  } catch (err) {
+    // Kaputte Datei NICHT still als „leer" behandeln: der nächste Speichervorgang würde
+    // sonst alle Drucker überschreiben. Zur Seite legen, dann leer weitermachen.
+    const backup = `${CONFIG_FILE}.broken-${Date.now()}`;
+    try { renameSync(CONFIG_FILE, backup); } catch { /* ignore */ }
+    console.error(`[config] ${CONFIG_FILE} ist unlesbar (${String(err)}) — verschoben nach ${backup}`);
+    return emptyConfig();
   }
+  if (raw.version === 2) return normalizeConfig(raw);
+  // Legacy single-printer format → auto-migrate and persist
+  const cfg = migrate(raw);
+  saveMultiConfig(cfg);
+  return cfg;
 }
 
 export function saveMultiConfig(cfg: MultiConfig): void {
-  if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true });
-  writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf-8');
+  if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  // Atomar schreiben (tmp + rename): ein Absturz mitten im Schreiben hinterlässt sonst
+  // eine halbe Datei. 0600, weil Access Codes/Passwörter drinstehen.
+  const tmp = `${CONFIG_FILE}.tmp`;
+  writeFileSync(tmp, JSON.stringify(cfg, null, 2), { encoding: 'utf-8', mode: 0o600 });
+  renameSync(tmp, CONFIG_FILE);
 }
 
 export function newPrinterId(): string {
