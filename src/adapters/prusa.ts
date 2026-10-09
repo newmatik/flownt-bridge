@@ -33,7 +33,7 @@ interface PrusaJob {
 // ATTENTION heißt „Nutzereingriff nötig" (Filamentwechsel, MMU-Stau, …) und kann mitten
 // im Druck auftreten — mit laufendem Job als paused werten (Job lebt noch, kein job_failed),
 // ohne Job als error (Drucker braucht Hilfe, druckt aber nichts).
-function mapState(state: string, hasJob: boolean): PrinterSnapshot['status'] {
+export function mapState(state: string, hasJob: boolean): PrinterSnapshot['status'] {
   switch (state) {
     case 'PRINTING': return 'printing';
     case 'PAUSED':   return 'paused';
@@ -50,7 +50,7 @@ function mapState(state: string, hasJob: boolean): PrinterSnapshot['status'] {
 
 // Normalisierter Job-Ausgang. Entscheidend: FINISHED ≠ STOPPED — ein Abbruch darf nicht
 // als Erfolg abgebucht werden (gleiche Logik wie complete/cancelled bei Moonraker).
-function mapJobResult(state: string): JobResult | null {
+export function mapJobResult(state: string): JobResult | null {
   switch (state) {
     case 'FINISHED': return 'completed';
     case 'STOPPED':  return 'aborted';

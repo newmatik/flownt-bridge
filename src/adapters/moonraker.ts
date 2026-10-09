@@ -18,11 +18,12 @@ interface MoonrakerQueryResponse {
   };
 }
 
-function mapState(state: string): PrinterSnapshot['status'] {
+export function mapState(state: string): PrinterSnapshot['status'] {
   switch (state) {
     case 'printing':
-    case 'paused':
       return 'printing';
+    case 'paused':
+      return 'paused'; // Job lebt noch; die Bridge sendet paused als printing
     case 'error':
       return 'error';
     case 'standby':
@@ -34,8 +35,8 @@ function mapState(state: string): PrinterSnapshot['status'] {
 }
 
 // Normalisierter Job-Ausgang aus print_stats.state. Entscheidend: complete ≠ cancelled
-// (heute kollabieren beide zu idle → der Abbruch würde sonst als Erfolg abgebucht).
-function mapJobResult(state: string): JobResult | null {
+// (beide kollabieren im Status zu idle → der Abbruch würde sonst als Erfolg abgebucht).
+export function mapJobResult(state: string): JobResult | null {
   switch (state) {
     case 'complete':  return 'completed';
     case 'cancelled': return 'aborted';
