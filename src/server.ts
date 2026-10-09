@@ -12,7 +12,7 @@ import { Adapter, PrinterCommand, PrinterSnapshot } from './adapters/types.js';
 import { getEventLog } from './events.js';
 import { BRIDGE_VERSION } from './version.js';
 
-const PORT = Number(process.env.FLOWNT_BRIDGE_PORT) || 7432;
+export const PORT = Number(process.env.FLOWNT_BRIDGE_PORT) || 7432;
 
 // ── Shared state ──────────────────────────────────────────────────────────────
 
@@ -417,9 +417,10 @@ function statusPage(): string {
           const globalIdx = sl.ams_unit * 4 + sl.slot;
           const isActive  = snap?.activeMqttSlot === globalIdx;
           const ring      = isActive ? 'box-shadow:0 0 0 2px #ff7a2f;' : '';
+          const color     = /^#[0-9A-Fa-f]{6}$/.test(sl.color) ? sl.color : '#888888';
           return `<div style="text-align:center;flex:1;min-width:0;">
-            <div style="width:30px;height:30px;border-radius:50%;background:${sl.color};margin:0 auto 3px;${ring}border:1.5px solid rgba(128,128,128,0.5);"></div>
-            <div style="font-size:0.63rem;color:#888;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${sl.material || '–'}</div>
+            <div style="width:30px;height:30px;border-radius:50%;background:${color};margin:0 auto 3px;${ring}border:1.5px solid rgba(128,128,128,0.5);"></div>
+            <div style="font-size:0.63rem;color:#888;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escAttr(sl.material || '–')}</div>
             <div style="font-size:0.63rem;color:#555;">${sl.remain ?? 0}%</div>
           </div>`;
         }).join('');
@@ -460,24 +461,24 @@ function statusPage(): string {
           return `<div class="ev-row">
             <span class="ev-icon" style="color:${color};">${icon}</span>
             <span class="ev-time">${time}</span>
-            <span class="ev-msg">${ev.msg}</span>
+            <span class="ev-msg">${escAttr(ev.msg)}</span>
           </div>`;
         }).join('');
 
     const errHtml = state?.error
-      ? `<div style="color:#ef4444;font-size:0.75rem;margin-bottom:0.5rem;">⚠ ${state.error.slice(0, 80)}</div>`
+      ? `<div style="color:#ef4444;font-size:0.75rem;margin-bottom:0.5rem;">⚠ ${escAttr(state.error.slice(0, 80))}</div>`
       : '';
 
     return `<div class="card">
       <div class="printer-header">
         <span class="dot ${dotClass}"></span>
-        <span class="printer-name">${printer.name}</span>
+        <span class="printer-name">${escAttr(printer.name)}</span>
         <span class="badge">${adapterLabel}</span>
         <a href="/setup/${printer.id}" class="btn btn-ghost" style="padding:0.3rem 0.625rem;font-size:0.78rem;">${t.edit}</a>
       </div>
       <div class="stat-box">
         <div style="font-size:1.1rem;font-weight:700;">${statusLabel}</div>
-        ${snap?.printFile ? `<div class="info-row">📄 ${snap.printFile}${snap.progressPct != null ? ` · ${snap.progressPct}%` : ''}${etaStr}</div>` : ''}
+        ${snap?.printFile ? `<div class="info-row">📄 ${escAttr(snap.printFile)}${snap.progressPct != null ? ` · ${snap.progressPct}%` : ''}${etaStr}</div>` : ''}
         ${snap?.tempHotend != null ? `<div class="info-row">🌡 ${snap.tempHotend}°C${snap.tempBed != null ? ` · ${t.bed} ${snap.tempBed}°C` : ''}</div>` : ''}
       </div>
       ${amsHtml}
@@ -511,12 +512,12 @@ function setupListPage(): string {
     : cfg.printers.map(p => {
         const adapterLabel = p.adapterType === 'bambu' ? 'Bambu Lab' : p.adapterType === 'prusa' ? 'Prusa Link' : 'Moonraker';
         const state = printerStates.get(p.id);
-        const dotClass = !state?.running ? 'gray' : state.snapshot?.status === 'printing' ? 'green' : 'green';
+        const dotClass = state?.running ? 'green' : 'gray';
         return `<div class="list-row">
           <span class="dot ${dotClass}"></span>
           <div style="flex:1;">
-            <div class="list-name">${p.name}</div>
-            <div class="list-sub">${adapterLabel} · ${p.adapterUrl || '–'}</div>
+            <div class="list-name">${escAttr(p.name)}</div>
+            <div class="list-sub">${adapterLabel} · ${escAttr(p.adapterUrl || '–')}</div>
           </div>
           <div style="display:flex;gap:0.375rem;">
             <a href="/setup/${p.id}" class="btn btn-ghost" style="padding:0.3rem 0.625rem;font-size:0.78rem;">${t.edit}</a>
@@ -548,9 +549,8 @@ function setupListPage(): string {
 // ── Add / Edit form ────────────────────────────────────────────────────────────
 
 // Vorbefüllung per Deep-Link aus Flownt („In Bridge öffnen"): Name/Token/Adapter/IP/Serial
-// kommen als Query-Parameter. Der Access Code bleibt bewusst leer (Secret nur lokal).
-// Vorbefüllung reflektiert URL-Parameter in HTML → alle Werte über das bestehende
-// escAttr() (Reflected-XSS-Schutz). Der Access Code bleibt bewusst leer (Secret nur lokal).
+// kommen als Query-Parameter. Sie werden in HTML reflektiert → alle Werte über escAttr()
+// (Reflected-XSS-Schutz). Der Access Code bleibt bewusst leer (Secret nur lokal).
 export interface FormPrefill { token?: string; name?: string; adapter?: string; url?: string; serial?: string; }
 
 function printerFormPage(printer?: PrinterConfig, error?: string, prefill?: FormPrefill): string {
@@ -605,7 +605,7 @@ function printerFormPage(printer?: PrinterConfig, error?: string, prefill?: Form
       <label>${t.serial}</label>
       <input name="bambuSerial" placeholder="${t.serialPlaceholder}" value="${vBambuSerial}"/>
       <label>${t.accessCode}</label>
-      <input name="bambuCode" type="password" placeholder="8-stelliger Code" value="${printer?.adapterType === 'bambu' ? printer.adapterApiKey : ''}"${prefilled ? ' autofocus' : ''}/>
+      <input name="bambuCode" type="password" placeholder="8-stelliger Code" value="${escAttr(printer?.adapterType === 'bambu' ? printer.adapterApiKey : '')}"${prefilled ? ' autofocus' : ''}/>
       <p class="hint">${t.accessCodeHint}</p>
       <hr class="sep"/>
       <div class="section-label" style="margin-bottom:0.625rem;">${t.bambuCloud}</div>
@@ -620,21 +620,21 @@ function printerFormPage(printer?: PrinterConfig, error?: string, prefill?: Form
       <label>${t.printerUrl}</label>
       <input name="moonrakerUrl" placeholder="http://192.168.1.100" value="${vMoonUrl}"/>
       <label>${t.apiKey}</label>
-      <input name="moonrakerKey" type="password" value="${printer?.adapterType === 'moonraker' ? printer.adapterApiKey : ''}"/>
+      <input name="moonrakerKey" type="password" value="${escAttr(printer?.adapterType === 'moonraker' ? printer.adapterApiKey : '')}"/>
     </div>
 
     <div id="adapter-prusa">
       <label>${t.printerUrl}</label>
       <input name="prusaUrl" placeholder="http://192.168.1.100" value="${vPrusaUrl}"/>
       <label>${t.apiKey}</label>
-      <input name="prusaKey" type="password" value="${printer?.adapterType === 'prusa' ? printer.adapterApiKey : ''}"${prefilled ? ' autofocus' : ''}/>
+      <input name="prusaKey" type="password" value="${escAttr(printer?.adapterType === 'prusa' ? printer.adapterApiKey : '')}"${prefilled ? ' autofocus' : ''}/>
       <p class="hint">${t.prusaApiKeyHint}</p>
     </div>
 
     <hr class="sep"/>
     <div class="section-label" style="margin-bottom:0.625rem;">${t.smartPlug}</div>
     <label>${t.smartPlugIp}</label>
-    <input name="shellyUrl" placeholder="192.168.1.50" value="${printer?.smartPlugUrl ?? ''}"/>
+    <input name="shellyUrl" placeholder="192.168.1.50" value="${escAttr(printer?.smartPlugUrl ?? '')}"/>
     <p class="hint">${t.smartPlugHint}</p>
 
     <button class="btn btn-full" type="submit" style="margin-top:0.5rem;">${t.save}</button>
@@ -728,6 +728,13 @@ function callDymoConnect(body: string): Promise<string> {
 
 // ── Express server ─────────────────────────────────────────────────────────────
 
+const COMMAND_TYPES: readonly PrinterCommand['type'][] = ['pause', 'resume', 'stop'];
+
+// Nur lokale Pfade als Rücksprung-Ziel zulassen (kein Open Redirect über returnUrl).
+export function safeReturnUrl(url: unknown): string {
+  return typeof url === 'string' && url.startsWith('/') && !url.startsWith('//') && !url.includes('\\') ? url : '/';
+}
+
 export function startServer(callbacks: ServerCallbacks): void {
   const app = express();
   app.use(express.urlencoded({ extended: true }));
@@ -811,8 +818,10 @@ export function startServer(callbacks: ServerCallbacks): void {
   app.options('/printer/command', (_req, res) => res.sendStatus(204));
   app.post('/printer/command', async (req, res) => {
     const body = req.body as PrinterCommand & { printerId?: string };
-    const { printerId, ...cmd } = body;
-    if (!(cmd as { type?: string }).type) return res.status(400).json({ ok: false, error: 'Missing command type' });
+    const { printerId, ...cmd } = body ?? {};
+    if (!COMMAND_TYPES.includes((cmd as { type?: string }).type as PrinterCommand['type'])) {
+      return res.status(400).json({ ok: false, error: 'Invalid command type (pause | resume | stop)' });
+    }
 
     let adapter: Adapter | null | undefined;
     if (printerId) {
@@ -860,7 +869,7 @@ export function startServer(callbacks: ServerCallbacks): void {
       cfg.language = lang;
       saveMultiConfig(cfg);
     }
-    res.redirect(returnUrl ?? '/');
+    res.redirect(safeReturnUrl(returnUrl));
   });
 
   // ── Pages ───────────────────────────────────────────────────────────────────
@@ -956,6 +965,8 @@ export function startServer(callbacks: ServerCallbacks): void {
     const id = req.params.id;
     const multi = loadMultiConfig();
     const existing = multi.printers.find(p => p.id === id);
+    // Unbekannte ID (z. B. inzwischen gelöscht): nicht still einen Geister-Drucker starten.
+    if (!existing) return res.redirect('/setup');
     const { cfg: updated, error } = parseForm(req.body as Record<string, string>, id);
     if (!updated) return res.send(printerFormPage(existing, error));
     multi.printers = multi.printers.map(p => p.id === id ? updated : p);
@@ -973,7 +984,14 @@ export function startServer(callbacks: ServerCallbacks): void {
     res.redirect('/setup');
   });
 
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`[flownt-bridge] Web UI running at http://localhost:${PORT}`);
+  });
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    // Sonst endet z. B. ein belegter Port in einem unbehandelten 'error'-Event (Stacktrace).
+    const hint = err.code === 'EADDRINUSE'
+      ? ` Port ${PORT} ist belegt — läuft die Bridge schon? (anderer Port: FLOWNT_BRIDGE_PORT)` : '';
+    console.error(`[flownt-bridge] Web-UI konnte nicht starten: ${err.message}.${hint}`);
+    process.exit(1);
   });
 }
