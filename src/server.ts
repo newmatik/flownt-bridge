@@ -39,7 +39,7 @@ interface Tr {
   editPrinter: string; myPrinters: string; printerName: string;
   printerNamePlaceholder: string; printerType: string; authToken: string;
   authTokenHint: string; prefilledFromFlownt: string; ipAddress: string; serial: string;
-  serialPlaceholder: string; accessCode: string; accessCodeHint: string;
+  serialPlaceholder: string; accessCode: string; accessCodePlaceholder: string; accessCodeHint: string;
   printerUrl: string; apiKey: string; bambuCloud: string;
   cloudEmail: string; cloudEmailHint: string; cloudPassword: string;
   save: string; cancel: string; delete: string; edit: string;
@@ -75,6 +75,7 @@ const T: Record<BridgeLang, Tr> = {
     serial: 'Seriennummer',
     serialPlaceholder: '00M09A123456789',
     accessCode: 'Access Code',
+    accessCodePlaceholder: '8-stelliger Code',
     accessCodeHint: 'Alle drei Werte auf dem Druckerdisplay unter Einstellungen → Netzwerk.',
     printerUrl: 'Drucker-URL',
     apiKey: 'API-Key (optional)',
@@ -144,6 +145,7 @@ const T: Record<BridgeLang, Tr> = {
     serial: 'Serial Number',
     serialPlaceholder: '00M09A123456789',
     accessCode: 'Access Code',
+    accessCodePlaceholder: '8-character code',
     accessCodeHint: 'Find all three values on the printer display under Settings → Network.',
     printerUrl: 'Printer URL',
     apiKey: 'API Key (optional)',
@@ -181,7 +183,7 @@ const T: Record<BridgeLang, Tr> = {
     roleQ: 'What should this bridge do?',
     roleHint: 'You can change this anytime.',
     roleMonitor: 'Monitor printers',
-    roleMonitorD: 'Live status & automatic print logs (e.g. always-on the Pi).',
+    roleMonitorD: 'Live status & automatic print logs (e.g. always on, on a Raspberry Pi).',
     roleLabel: 'Print labels',
     roleLabelD: 'Local label printing (Dymo etc.) from this device.',
     roleBoth: 'Both',
@@ -605,7 +607,7 @@ function printerFormPage(printer?: PrinterConfig, error?: string, prefill?: Form
       <label>${t.serial}</label>
       <input name="bambuSerial" placeholder="${t.serialPlaceholder}" value="${vBambuSerial}"/>
       <label>${t.accessCode}</label>
-      <input name="bambuCode" type="password" placeholder="8-stelliger Code" value="${escAttr(printer?.adapterType === 'bambu' ? printer.adapterApiKey : '')}"${prefilled ? ' autofocus' : ''}/>
+      <input name="bambuCode" type="password" placeholder="${t.accessCodePlaceholder}" value="${escAttr(printer?.adapterType === 'bambu' ? printer.adapterApiKey : '')}"${prefilled ? ' autofocus' : ''}/>
       <p class="hint">${t.accessCodeHint}</p>
       <hr class="sep"/>
       <div class="section-label" style="margin-bottom:0.625rem;">${t.bambuCloud}</div>
