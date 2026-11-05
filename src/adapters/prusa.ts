@@ -59,6 +59,16 @@ function mapJobResult(state: string): JobResult | null {
   }
 }
 
+// One path on this printer. A single leading "/", and no "\", "://" or "@",
+// so the printer API key stays on the configured host.
+function isSingleDownloadPath(download: string): boolean {
+  return download.startsWith('/')
+    && !download.startsWith('//')
+    && !download.includes('\\')
+    && !download.includes('://')
+    && !download.includes('@');
+}
+
 export class PrusaLinkAdapter implements Adapter {
   private baseUrl: string;
   private apiKey: string;
@@ -92,6 +102,10 @@ export class PrusaLinkAdapter implements Adapter {
 
       const download = job.file?.refs?.download;
       if (!download || !this.currentFileName) return;
+      if (!isSingleDownloadPath(download)) {
+        console.warn('[prusa] Druckdatei abgelehnt: kein einzelner Pfad');
+        return;
+      }
       const fileRes = await fetch(`${this.baseUrl}${download}`, { headers: this.headers(), signal: AbortSignal.timeout(60_000) });
       if (!fileRes.ok) {
         console.warn(`[prusa] Druckdatei nicht abrufbar (${fileRes.status}): ${this.currentFileName}`);
