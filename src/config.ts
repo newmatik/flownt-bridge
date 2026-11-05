@@ -73,8 +73,9 @@ export function loadMultiConfig(): MultiConfig {
 }
 
 export function saveMultiConfig(cfg: MultiConfig): void {
-  if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true });
-  writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf-8');
+  // config.json holds printer access codes and the cloud password.
+  if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), { encoding: 'utf-8', mode: 0o600 });
 }
 
 export function newPrinterId(): string {
